@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/module.h>
@@ -16,6 +16,10 @@
 #define CPUCP_CLEAR_IRQ_VAL		BIT(3)
 #define CPUCP_STATUS_IRQ_VAL		BIT(3)
 #define APSS_CPUCP_RX_MBOX_CMD_MASK	0xFFFFFFFFFFFFFFFF
+
+
+
+static DEFINE_SPINLOCK(cpucp_lock);
 
 /**
  * struct cpucp_ipc     ipc per channel
@@ -113,12 +117,15 @@ static int qcom_cpucp_mbox_startup(struct mbox_chan *chan)
 	struct qcom_cpucp_ipc *cpucp_ipc = container_of(chan->mbox, struct qcom_cpucp_ipc, mbox);
 	unsigned long chan_id = (unsigned long)chan->con_priv;
 	const struct qcom_cpucp_mbox_desc *desc = cpucp_ipc->desc;
+	unsigned long flags;
 	u64 val;
 
 	if (desc->v2_mbox) {
+		spin_lock_irqsave(&cpucp_lock, flags);
 		val = readq(cpucp_ipc->rx_irq_base + desc->enable_reg);
 		val |= ((u64)1 << chan_id);
 		writeq(val, cpucp_ipc->rx_irq_base + desc->enable_reg);
+		spin_unlock_irqrestore(&cpucp_lock, flags);
 	}
 
 	return 0;
@@ -133,9 +140,11 @@ static void qcom_cpucp_mbox_shutdown(struct mbox_chan *chan)
 	u64 val;
 
 	if (desc->v2_mbox) {
+		spin_lock_irqsave(&cpucp_lock, flags);
 		val = readq(cpucp_ipc->rx_irq_base + desc->enable_reg);
 		val &= ~((u64)1 << chan_id);
 		writeq(val, cpucp_ipc->rx_irq_base + desc->enable_reg);
+		spin_unlock_irqrestore(&cpucp_lock, flags);
 	}
 
 	spin_lock_irqsave(&cpucp_ipc->chans_locks[chan_id], flags);
@@ -265,12 +274,6 @@ static int qcom_cpucp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	for (i = 0; i < desc->num_chans; i++)
 		spin_lock_init(&cpucp_ipc->chans_locks[i]);
-
-	if (desc->v2_mbox) {
-		writeq(0, cpucp_ipc->rx_irq_base + desc->enable_reg);
-		writeq(0, cpucp_ipc->rx_irq_base + desc->clear_reg);
-		writeq(0, cpucp_ipc->rx_irq_base + desc->map_reg);
-	}
 
 	cpucp_ipc->irq = platform_get_irq(pdev, 0);
 	if (cpucp_ipc->irq < 0) {
