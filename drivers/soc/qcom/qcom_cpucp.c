@@ -17,10 +17,6 @@
 #define CPUCP_STATUS_IRQ_VAL		BIT(3)
 #define APSS_CPUCP_RX_MBOX_CMD_MASK	0xFFFFFFFFFFFFFFFF
 
-
-
-static DEFINE_SPINLOCK(cpucp_lock);
-
 /**
  * struct cpucp_ipc     ipc per channel
  * @mbox:		mailbox-controller interface
@@ -56,6 +52,9 @@ struct qcom_cpucp_mbox_desc {
 	u32 num_chans;
 };
 
+/* Global lock for some shared RX regs on v2 mbox */
+static DEFINE_SPINLOCK(cpucp_v2_rx_lock);
+
 static irqreturn_t qcom_cpucp_rx_interrupt(int irq, void *p)
 {
 	struct qcom_cpucp_ipc *cpucp_ipc = p;
@@ -90,6 +89,7 @@ static irqreturn_t qcom_cpucp_v2_mbox_rx_interrupt(int irq, void *p)
 	int i;
 	unsigned long flags;
 
+/* cpucp_v2_rx_lock not used as it is assumed shared RX use same irq */
 	status = readq(cpucp_ipc->rx_irq_base + desc->status_reg);
 
 	for (i = 0; i < desc->num_chans; i++) {
@@ -121,11 +121,11 @@ static int qcom_cpucp_mbox_startup(struct mbox_chan *chan)
 	u64 val;
 
 	if (desc->v2_mbox) {
-		spin_lock_irqsave(&cpucp_lock, flags);
+		spin_lock_irqsave(&cpucp_v2_rx_lock, flags);
 		val = readq(cpucp_ipc->rx_irq_base + desc->enable_reg);
 		val |= ((u64)1 << chan_id);
 		writeq(val, cpucp_ipc->rx_irq_base + desc->enable_reg);
-		spin_unlock_irqrestore(&cpucp_lock, flags);
+		spin_unlock_irqrestore(&cpucp_v2_rx_lock, flags);
 	}
 
 	return 0;
@@ -140,11 +140,11 @@ static void qcom_cpucp_mbox_shutdown(struct mbox_chan *chan)
 	u64 val;
 
 	if (desc->v2_mbox) {
-		spin_lock_irqsave(&cpucp_lock, flags);
+		spin_lock_irqsave(&cpucp_v2_rx_lock, flags);
 		val = readq(cpucp_ipc->rx_irq_base + desc->enable_reg);
 		val &= ~((u64)1 << chan_id);
 		writeq(val, cpucp_ipc->rx_irq_base + desc->enable_reg);
-		spin_unlock_irqrestore(&cpucp_lock, flags);
+		spin_unlock_irqrestore(&cpucp_v2_rx_lock, flags);
 	}
 
 	spin_lock_irqsave(&cpucp_ipc->chans_locks[chan_id], flags);
