@@ -1026,6 +1026,7 @@ struct haptics_chip {
 	int				trig_gpio[TRIG_GPIO_NUM];
 	int				trig_irq[TRIG_GPIO_NUM];
 	int				current_irq;
+	atomic_t			check_trig_status;
 	struct delayed_work		sw_trig_work;
 	bool				trig_support;
 	u32				current_play_us;
@@ -5855,10 +5856,17 @@ static int haptics_parse_brake_dt(struct haptics_chip *chip)
 static irqreturn_t trig_irq_handler(int irq, void *data)
 {
 	struct haptics_chip *chip = data;
+	int old, next;
 	if (!chip) {
 		dev_err(chip->dev,"trig_irq_handler null.\n");
 		return IRQ_HANDLED;
 	}
+
+	old = atomic_read(&chip->check_trig_status);
+	do {
+		next = old == INT_MAX ? 1 : old + 1;
+	} while (!atomic_try_cmpxchg(&chip->check_trig_status, &old, next));
+
 	chip->current_irq = irq;
 	if ((chip->play.pattern_src == FIFO) &&
 		atomic_read(&chip->play.fifo_status.is_busy)) {
@@ -8294,6 +8302,29 @@ static ssize_t trig_support_store(const struct class *c,
 	return count;
 }
 static CLASS_ATTR_RW(trig_support);
+static ssize_t check_trig_status_show(const struct class *c,
+		const struct class_attribute *attr, char *buf)
+{
+	struct haptics_chip *chip = container_of(c,
+			struct haptics_chip, hap_class);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", atomic_read(&chip->check_trig_status));
+}
+
+static ssize_t check_trig_status_store(const struct class *c,
+		const struct class_attribute *attr, const char *buf, size_t count)
+{
+	struct haptics_chip *chip = container_of(c,
+			struct haptics_chip, hap_class);
+	int val;
+
+	if (kstrtoint(buf, 0, &val) || val < 0)
+		return -EINVAL;
+	atomic_set(&chip->check_trig_status, val);
+	dev_err(chip->dev, "set check_trig_status = %d\n", val);
+	return count;
+}
+static CLASS_ATTR_RW(check_trig_status);
 #endif
 
 static ssize_t primitive_duration_show(const struct class *c,
@@ -8426,6 +8457,7 @@ static struct attribute *hap_class_attrs[] = {
 	&class_attr_vibrator_type.attr,
 	&class_attr_livetap_support.attr,
 	&class_attr_trig_support.attr,
+	&class_attr_check_trig_status.attr,
 #endif
 	&class_attr_primitive_duration.attr,
 	&class_attr_visense_enabled.attr,
@@ -8902,6 +8934,9 @@ static int haptics_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	chip->dev = &pdev->dev;
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	atomic_set(&chip->check_trig_status, 0);
+#endif
 	dev_set_drvdata(chip->dev, chip);
 	chip->regmap = dev_get_regmap(chip->dev->parent, NULL);
 	if (!chip->regmap) {
