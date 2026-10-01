@@ -33,6 +33,9 @@
 #include "trace.h"
 #include <linux/rtc.h>
 #include <linux/time.h>
+#include <linux/delay.h>
+#include "bcl_pmic5_internal.h"
+#include "oplus_bcl_pmic5.h"
 #endif
 
 #define BCL_DRIVER_NAME       "bcl_pmic5"
@@ -111,6 +114,7 @@
 			} \
 		} while (0)
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
 enum bcl_dev_type {
 	BCL_IBAT_LVL0,
 	BCL_IBAT_LVL1,
@@ -139,15 +143,6 @@ enum {
 	REG_MAX,
 };
 
-#ifdef OPLUS_FEATURE_CHG_BASIC
-enum {
-	PMIC_SUBTYPE_PMH0101,
-	PMIC_SUBTYPE_PMIH010X,
-	PMIC_SUBTYPE_PM8550,
-	PMIC_SUBTYPE_MAX,
-};
-#endif
-
 struct bcl_desc {
 	bool vadc_type;
 	u32 vbat_regs[REG_MAX];
@@ -157,6 +152,7 @@ struct bcl_desc {
 	u32 ibat_scaling_factor;
 	u32 ibat_thresh_scaling_factor;
 };
+#endif
 
 static char bcl_int_names[BCL_TYPE_MAX][25] = {
 	"bcl-ibat-lvl0",
@@ -184,6 +180,7 @@ static uint32_t bcl_ibat_ext_ranges[BCL_IBAT_RANGE_MAX] = {
 	25
 };
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
 struct bcl_device;
 
 struct bcl_peripheral_data {
@@ -200,15 +197,6 @@ struct bcl_peripheral_data {
 	struct thermal_zone_device *tz_dev;
 	struct bcl_device	*dev;
 };
-
-#ifdef OPLUS_FEATURE_CHG_BASIC
-struct dynamic_vbat_data {
-	int temp;
-	int vbat_mv_lv0;
-	int vbat_mv_lv1;
-	int vbat_mv_lv2;
-};
-#endif
 
 struct bcl_device {
 	struct device			*dev;
@@ -228,73 +216,18 @@ struct bcl_device {
 	struct bcl_peripheral_data	param[BCL_TYPE_MAX];
 	const struct bcl_desc		*desc;
 	struct notifier_block		nb;
-#ifdef OPLUS_FEATURE_CHG_BASIC
-	bool				support_track;
-	int				id;
-	bool				support_dynamic_vbat;
-	struct dynamic_vbat_data	*dynamic_vbat_config;
-	int				dynamic_vbat_config_count;
-	struct notifier_block		psy_nb;
-	struct work_struct		vbat_check_work;
-	int				pmic_type;
-#endif
 };
+#endif
 
 static struct bcl_device *bcl_devices[MAX_PERPH_COUNT];
 static int bcl_device_ct;
+
 #ifdef OPLUS_FEATURE_CHG_BASIC
-static int BCL_LEVEL0_COUNT;
-static int BCL_LEVEL1_COUNT;
-static int BCL_LEVEL2_COUNT;
-struct proc_dir_entry *oplus_bcl_stat;
-
-struct timeval {
-	long tv_sec;
-	long tv_usec;
-};
-
-static int get_pmic_subtype(struct bcl_device *bcl_perph)
-{
-	unsigned int data = 0;
-	int ret = 0;
-	ret = regmap_read(bcl_perph->regmap, SUBTYPE_ADDR, &data);
-	if (ret < 0) {
-		pr_err("Error reading PMIC SUBTYPE, err:%d\n",ret);
-		return PMIC_SUBTYPE_MAX;
-	}
-
-	if (data == SUBTYPE_NUKU) { /* pmh0101 */
-		return PMIC_SUBTYPE_PMH0101;
-	} else if (data == SUBTYPE_PMIH ) { /* pmih010x */
-		return PMIC_SUBTYPE_PMIH010X;
-	} else if (data == SUBTYPE_PM8550 ) { /* pm8550 */
-		return PMIC_SUBTYPE_PM8550;
-	} else {
-		pr_debug("invalid subtype = 0x%x\n", data);
-		return PMIC_SUBTYPE_MAX;
-	}
-}
-
-static ssize_t bcl_count_show(struct file *file, char __user *buf,
-		size_t count, loff_t *ppos)
-{
-	char buffer[256];
-	size_t len = 0;
-
-	len = snprintf(buffer, sizeof(buffer), "%d  %d  %d\n", BCL_LEVEL0_COUNT, BCL_LEVEL1_COUNT, BCL_LEVEL2_COUNT);
-	return simple_read_from_buffer(buf, count, ppos, buffer, len);
-}
-
-static void do_gettimeofday(struct timeval *tv)
-{
-	struct timespec64 now;
-
-	ktime_get_real_ts64(&now);
-	tv->tv_sec = now.tv_sec;
-	tv->tv_usec = now.tv_nsec/1000;
-}
-#endif
+/* bcl_pmic5_notifier is used by oplus_bcl_pmic5.c, so it cannot be static */
+BLOCKING_NOTIFIER_HEAD(bcl_pmic5_notifier);
+#else
 static BLOCKING_NOTIFIER_HEAD(bcl_pmic5_notifier);
+#endif
 
 void bcl_pmic5_notifier_register(struct notifier_block *n)
 {
@@ -352,8 +285,13 @@ static int bcl_read_register(struct bcl_device *bcl_perph, int16_t reg_offset,
 	return ret;
 }
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+int bcl_write_register(struct bcl_device *bcl_perph,
+				int16_t reg_offset, uint8_t data)
+#else
 static int bcl_write_register(struct bcl_device *bcl_perph,
 				int16_t reg_offset, uint8_t data)
+#endif
 {
 	int  ret = 0;
 	uint8_t *write_buf = &data;
@@ -398,7 +336,11 @@ static void convert_adc_to_vbat_val(int *val)
 	*val = (*val * BCL_VBAT_SCALING_UV) / 1000;
 }
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+void convert_vbat_to_vcmp_val(const struct bcl_desc *desc, int vbat, int *val)
+#else
 static void convert_vbat_to_vcmp_val(const struct bcl_desc *desc, int vbat, int *val)
+#endif
 {
 	if (vbat > desc->vcmp_thresh_max)
 		vbat = desc->vcmp_thresh_max;
@@ -691,40 +633,12 @@ static int bcl_config_vph_cb(struct notifier_block *nb,
 }
 
 #ifdef OPLUS_FEATURE_CHG_BASIC
-static int oplus_bcl_write_vbat_tz(struct bcl_device *bcl_perph, int trip_id, int temp)
-{
-	int ret = 0;
-	int val = 0;
-	int16_t addr;
-	if (temp <= 0) {
-		pr_err("Invalid input temp\n");
-		return -EINVAL;
-	} else if (temp < BCL_VBAT_THRESH_BASE) {
-		pr_err("input temp is %d, lower than MIN\n", temp);
-		return -EINVAL;
-	} else if (temp > BCL_VBAT_MAX_MV) {
-		pr_err("input temp is %d, higher than MAX\n", temp);
-		return -EINVAL;
-	}
-	addr = bcl_perph->desc->vbat_regs[trip_id];
-	convert_vbat_to_vcmp_val(bcl_perph->desc, temp, &val);
-	ret = bcl_write_register(bcl_perph, addr, val);
-	if (ret < 0) {
-		pr_err("oplus_bcl_write_vbat_tz fail to set vbat regs, err: %d\n", ret);
-		goto exit;
-	}
-	if (bcl_perph->desc->vbat_zone_enabled)
-		blocking_notifier_call_chain(&bcl_pmic5_notifier, trip_id, (void *)&temp);
-
-	pr_debug("oplus_bcl_write_vbat_tz trip_id: %d, vbat:%d mV\n", trip_id, temp);
-
-exit:
-	return ret;
-}
-#endif
-
+int bcl_write_vbat_tz(struct thermal_zone_device *tzd,
+					const struct thermal_trip *trip, int temp)
+#else
 static int bcl_write_vbat_tz(struct thermal_zone_device *tzd,
 					const struct thermal_trip *trip, int temp)
+#endif
 {
 	int ret = 0, val = 0, trip_id = 0;
 	struct bcl_peripheral_data *bat_data =
@@ -944,12 +858,6 @@ static irqreturn_t bcl_handle_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-#ifdef OPLUS_FEATURE_CHG_BASIC
-static const struct proc_ops proc_bcl_count = {
-	.proc_read		= bcl_count_show,
-};
-#endif
-
 static int bcl_get_ibat_ext_range_factor(struct platform_device *pdev,
 		uint32_t *ibat_range_factor)
 {
@@ -1000,60 +908,6 @@ static int bcl_get_ibat_ext_range_factor(struct platform_device *pdev,
 	return 0;
 }
 
-#ifdef OPLUS_FEATURE_CHG_BASIC
-static void bcl_get_dynamic_vbat_data(struct platform_device *pdev,
-					struct bcl_device *bcl_perph)
-{
-	int ret;
-	struct device_node *dev_node = pdev->dev.of_node;
-	int num_elem;
-	int buf[64] = {0};
-	int i;
-
-	bcl_perph->support_dynamic_vbat = of_property_read_bool(dev_node,"bcl,support_dynamic_vbat");
-	pr_err("bcl support_dynamic_vbat:%d, pmic_type:%d\n", bcl_perph->support_dynamic_vbat, bcl_perph->pmic_type);
-	if (bcl_perph->support_dynamic_vbat) {
-		num_elem = of_property_count_elems_of_size(dev_node, "bcl,dynamic_vbat_data", sizeof(int));
-		if (num_elem > 0) {
-			if (num_elem % 4) {
-				dev_err(&pdev->dev, "invalid len for dynamic_vbat_data\n");
-				goto err_exit;
-			}
-			ret = of_property_read_u32_array(dev_node, "bcl,dynamic_vbat_data", (u32 *)buf, num_elem);
-			if (ret) {
-				dev_err(&pdev->dev, "dynamic_vbat_data read failed %d\n", ret);
-				goto err_exit;
-			}
-
-			bcl_perph->dynamic_vbat_config_count = num_elem / 4;
-			bcl_perph->dynamic_vbat_config = devm_kcalloc(&pdev->dev,
-					bcl_perph->dynamic_vbat_config_count, sizeof(struct dynamic_vbat_data), GFP_KERNEL);
-			if (!bcl_perph->dynamic_vbat_config) {
-				dev_err(&pdev->dev, "fail to alloc dynamic_vbat_config memory\n");
-				goto err_exit;
-			}
-
-			for (i = 0; i < bcl_perph->dynamic_vbat_config_count; i++) {
-				bcl_perph->dynamic_vbat_config[i].temp = buf[i * 4 + 0];
-				bcl_perph->dynamic_vbat_config[i].vbat_mv_lv0 = buf[i * 4 + 1];
-				bcl_perph->dynamic_vbat_config[i].vbat_mv_lv1 = buf[i * 4 + 2];
-				bcl_perph->dynamic_vbat_config[i].vbat_mv_lv2 = buf[i * 4 + 3];
-				dev_err(&pdev->dev, "dynamic_vbat_config[%d]:temp=%d, lv0=%d, lv1=%d, lv2=%d\n", i,
-					bcl_perph->dynamic_vbat_config[i].temp,
-					bcl_perph->dynamic_vbat_config[i].vbat_mv_lv0,
-					bcl_perph->dynamic_vbat_config[i].vbat_mv_lv1,
-					bcl_perph->dynamic_vbat_config[i].vbat_mv_lv2);
-			}
-			return;
-		}
-	}
-
-err_exit:
-	bcl_perph->support_dynamic_vbat = false;
-	return;
-}
-#endif
-
 static int bcl_get_devicetree_data(struct platform_device *pdev,
 					struct bcl_device *bcl_perph)
 {
@@ -1092,6 +946,7 @@ static int bcl_get_devicetree_data(struct platform_device *pdev,
 	bcl_perph->support_track =  of_property_read_bool(dev_node,"bcl,support_track");
 	pr_err("bcl support_track:%d, id:%d\n", bcl_perph->support_track, bcl_perph->id);
 	bcl_get_dynamic_vbat_data(pdev, bcl_perph);
+	bcl_get_dynamic_vbat_cycle_compensation(pdev, bcl_perph);
 #endif
 	return ret;
 }
@@ -1382,162 +1237,18 @@ static void bcl_remove(struct platform_device *pdev)
 
 	if (!bcl_perph->desc->vbat_zone_enabled)
 		bcl_pmic5_notifier_unregister(&bcl_perph->nb);
-}
-
 #ifdef OPLUS_FEATURE_CHG_BASIC
-#define DEFAULT_BATT_TEMP 250
-static int bcl_read_battery_temp(struct bcl_device *bcl_perph, int *val)
-{
-	static struct power_supply *batt_psy;
-	union power_supply_propval ret = {0,};
-	int rc = 0;
-
-	*val = DEFAULT_BATT_TEMP;
-	if (!batt_psy)
-		batt_psy = power_supply_get_by_name("battery");
-	if (batt_psy) {
-		rc = power_supply_get_property(batt_psy,
-				POWER_SUPPLY_PROP_TEMP, &ret);
-		if (rc) {
-			dev_err(bcl_perph->dev, "battery temp read error:%d\n", rc);
-			return rc;
-		}
-		*val = ret.intval;
-	} else {
-		dev_err(bcl_perph->dev, "get battery psy failed\n");
-	}
-
-	return rc;
-}
-
-static int battery_supply_callback(struct notifier_block *nb,
-			unsigned long event, void *data)
-{
-	struct power_supply *psy = data;
-	struct bcl_device *bcl_perph =
-			container_of(nb, struct bcl_device, psy_nb);
-
-	if (strncmp(psy->desc->name, "battery", strlen("battery")) != 0)
-		return NOTIFY_OK;
-	if (bcl_perph->support_dynamic_vbat)
-		schedule_work(&bcl_perph->vbat_check_work);
-
-	return NOTIFY_OK;
-}
-
-static void bcl_vbat_check(struct work_struct *work)
-{
-	struct bcl_device *bcl_perph = container_of(work,
-			struct bcl_device, vbat_check_work);
-	int batt_temp;
-	int i;
-	int current_range;
-	static int pre_range = -1;
-	static int pre_temp = 0;
-	struct thermal_zone_device *tz;
-	tz = bcl_perph->param[BCL_VBAT_LVL0].tz_dev;
-	struct thermal_trip *trip;
-
-	if (!tz) {
-		dev_err(bcl_perph->dev, "tz_dev is NULL\n");
-		return;
-	}
-
-	trip = &tz->trips[BCLBIG_COMP_VCMP_L0_THR].trip;
-	if (!trip) {
-		dev_err(bcl_perph->dev, "trip is NULL\n");
-		return;
-	}
-
-	bcl_read_battery_temp(bcl_perph, &batt_temp);
-
-	for (i = 0; i < bcl_perph->dynamic_vbat_config_count; i++) {
-		if (batt_temp <= bcl_perph->dynamic_vbat_config[i].temp) {
-			current_range = i;
-			break;
-		}
-	}
-
-	if (i == bcl_perph->dynamic_vbat_config_count)
-		current_range = bcl_perph->dynamic_vbat_config_count - 1;
-
-	if (abs(pre_temp - batt_temp) > 10 || pre_range != current_range) {
-		pre_temp = batt_temp;
-		dev_err(bcl_perph->dev, "bcl_vbat_check batt_temp=%d,current_range=%d,pre_range=%d\n",
-				batt_temp, current_range, pre_range);
-	}
-
-	if (pre_range != current_range && (tz->num_trips == 3)) {
-		bcl_write_vbat_tz(tz, &tz->trips[BCLBIG_COMP_VCMP_L0_THR].trip,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv0);
-		bcl_write_vbat_tz(tz, &tz->trips[BCLBIG_COMP_VCMP_L1_THR].trip,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv1);
-		bcl_write_vbat_tz(tz, &tz->trips[BCLBIG_COMP_VCMP_L2_THR].trip,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv2);
-		pre_range = current_range;
-		dev_err(bcl_perph->dev, "update bcl vbat batt_temp=%d, lv0=%d, lv1=%d, lv2=%d\n",
-				batt_temp,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv0,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv1,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv2);
-	}
-}
-
-static void pmh0101_bcl_vbat_check(struct work_struct *work)
-{
-	struct bcl_device *bcl_perph = container_of(work,
-			struct bcl_device, vbat_check_work);
-	int batt_temp;
-	int i;
-	int current_range;
-	/* pre_range indicates previous volt change range, compare with current range to detect change */
-	static int pre_range = -1;
-	 /* pre_temp indicates previous temp value, compare with current temp to detect change */
-	static int pre_temp = 0;
-
-	bcl_read_battery_temp(bcl_perph, &batt_temp);
-
-	for (i = 0; i < bcl_perph->dynamic_vbat_config_count; i++) {
-		if (batt_temp <= bcl_perph->dynamic_vbat_config[i].temp) {
-			current_range = i;
-			break;
-		}
-	}
-	if (i == bcl_perph->dynamic_vbat_config_count)
-		current_range = bcl_perph->dynamic_vbat_config_count - 1;
-
-	if (abs(pre_temp - batt_temp) > 10 || pre_range != current_range) {
-		pre_temp = batt_temp;
-		dev_err(bcl_perph->dev, "bcl_vbat_check batt_temp=%d,current_range=%d,pre_range=%d\n",
-				batt_temp, current_range, pre_range);
-	}
-
-	if (pre_range != current_range) {
-		oplus_bcl_write_vbat_tz(bcl_perph,BCLBIG_COMP_VCMP_L0_THR,
-			bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv0);
-		oplus_bcl_write_vbat_tz(bcl_perph,BCLBIG_COMP_VCMP_L1_THR,
-			bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv1);
-		oplus_bcl_write_vbat_tz(bcl_perph,BCLBIG_COMP_VCMP_L2_THR,
-			bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv2);
-		pre_range = current_range;
-		dev_err(bcl_perph->dev, "update bcl vbat batt_temp=%d, lv0=%d, lv1=%d, lv2=%d\n",
-				batt_temp,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv0,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv1,
-				bcl_perph->dynamic_vbat_config[current_range].vbat_mv_lv2);
-	}
-}
+	oplus_bcl_remove(bcl_perph);
 #endif
+}
+
+/* OPLUS helper functions moved to oplus_bcl_pmic5.c */
 
 static int bcl_probe(struct platform_device *pdev)
 {
 	struct bcl_device *bcl_perph = NULL;
 	char bcl_name[40];
 	int err = 0;
-#ifdef OPLUS_FEATURE_CHG_BASIC
-	struct proc_dir_entry *proc_node;
-#endif
-
 	if (bcl_device_ct >= MAX_PERPH_COUNT) {
 		dev_err(&pdev->dev, "Max bcl peripheral supported already.\n");
 		return -EINVAL;
@@ -1614,28 +1325,8 @@ static int bcl_probe(struct platform_device *pdev)
 	if (!bcl_perph->ipc_log)
 		pr_err("%s: unable to create IPC Logging for %s\n",
 					__func__, bcl_name);
-
 #ifdef OPLUS_FEATURE_CHG_BASIC
-	oplus_bcl_stat = proc_mkdir("bcl_stat", NULL);
-	if (oplus_bcl_stat)
-		proc_node = proc_create("bcl_count", 0664, oplus_bcl_stat, &proc_bcl_count);
-	else
-		dev_err(&pdev->dev, "Couldn't creat oplus bcl_stat\n");
-
-	if (bcl_perph->support_dynamic_vbat) {
-		if (bcl_perph->pmic_type == PMIC_SUBTYPE_PMH0101 || bcl_perph->pmic_type == PMIC_SUBTYPE_PM8550) {
-			dev_err(&pdev->dev, "bcl_probe bcl_perph->pmic_type %d init work !\n", bcl_perph->pmic_type);
-			INIT_WORK(&bcl_perph->vbat_check_work, pmh0101_bcl_vbat_check);
-		} else { /* qcom default support pmih010x, so judge not pmh0101, default init work bac_vbat_check */
-			dev_err(&pdev->dev, "bcl_probe bcl_perph->pmic_type %d init work !\n", bcl_perph->pmic_type);
-			INIT_WORK(&bcl_perph->vbat_check_work, bcl_vbat_check);
-		}
-
-		bcl_perph->psy_nb.notifier_call = battery_supply_callback;
-		err = power_supply_reg_notifier(&bcl_perph->psy_nb);
-		if (err < 0)
-			dev_err(&pdev->dev, "psy notifier register error ret:%d\n", err);
-	}
+	oplus_bcl_probe_init(pdev, bcl_perph);
 #endif
 
 	return 0;
