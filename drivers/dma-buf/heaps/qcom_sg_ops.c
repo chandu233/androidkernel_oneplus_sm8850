@@ -573,6 +573,9 @@ void qcom_sg_buffer_init(struct qcom_sg_buffer *buffer)
 	INIT_LIST_HEAD(&buffer->attachments);
 	mutex_init(&buffer->lock);
 	kref_init(&buffer->kref);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_AIZEROCOPY)
+	buffer->release_via_cache = false;
+#endif
 }
 EXPORT_SYMBOL_GPL(qcom_sg_buffer_init);
 
@@ -583,17 +586,12 @@ void qcom_sg_release(struct kref *kref)
 
 	buffer = container_of(kref, struct qcom_sg_buffer, kref);
 
-	//add by zhenghaiqing for dma debug
-	struct dma_buf *dmabuf = buffer->vmperm->dmabuf;
-	trace_qcom_dma_free(buffer->len, dmabuf->__kabi_reserved2, dmabuf->exp_name?:"NULL");
-
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_AIZEROCOPY)
-	struct sg_table *table;
-	if (handle_dbuf_cache_release(dmabuf)) {
+	if (buffer->release_via_cache) {
+		struct sg_table *table = &buffer->sg_table;
+
 		dmabuf_caches_destroy_all();
-		table = &buffer->sg_table;
 		sg_free_table(table);
-		kfree(buffer);
 		mem_buf_vmperm_free(buffer->vmperm);
 #if IS_ENABLED(CONFIG_QCOM_DMABUF_HEAPS_SYSTEM) && IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_OSVELTE)
 		if (is_system_heap_deferred_free(buffer->free)) {
@@ -604,6 +602,7 @@ void qcom_sg_release(struct kref *kref)
 			}
 		}
 #endif /* CONFIG_QCOM_DMABUF_HEAPS_SYSTEM */
+		kfree(buffer);
 		return;
 	}
 #endif
@@ -640,6 +639,12 @@ void qcom_sg_dmabuf_release(struct dma_buf *dmabuf)
 {
 	struct qcom_sg_buffer *buffer = dmabuf->priv;
 
+	trace_qcom_dma_free(buffer->len, dmabuf->__kabi_reserved2,
+			    dmabuf->exp_name ? : "NULL");
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_AIZEROCOPY)
+	if (handle_dbuf_cache_release(dmabuf))
+		buffer->release_via_cache = true;
+#endif
 	qcom_sg_exit(buffer);
 }
 EXPORT_SYMBOL_GPL(qcom_sg_dmabuf_release);
